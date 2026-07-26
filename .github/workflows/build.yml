@@ -18,8 +18,10 @@ jobs:
 
       - name: Get version
         id: version
+        shell: bash
         run: |
-          VERSION=$(grep '^#define VERSION' version.h | cut -d'"' -f2)
+          VERSION=$(sed -n 's/^#define[[:space:]]\+VERSION[[:space:]]*"\([^"]*\)".*/\1/p' version.h | tr -d '\r')
+          echo "VERSION=$VERSION"
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
 
       - name: Build
