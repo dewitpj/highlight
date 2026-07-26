@@ -1,0 +1,22 @@
+# Executables
+highlight
+
+# Object files
+*.o
+
+# Editor files
+*~
+*.swp
+*.swo
+
+# macOS
+.DS_Store
+
+# VS Code
+.vscode/
+
+# CLion
+.idea/
+
+# Build directories
+build/
