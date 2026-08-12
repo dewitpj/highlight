@@ -10,7 +10,7 @@
 #include <errno.h>
 #include <ctype.h>
 
-#define VERSION "1.3.0"
+#define VERSION "1.4.0"
 
 #define COLOR_START "\033[1;31m"
 #define COLOR_END   "\033[0m"
@@ -20,10 +20,21 @@
 
 
 struct status {
+    /* Total statistics */
     unsigned long long lines;
     unsigned long long bytes;
 
+    /* Statistics for the current one-second interval */
+    unsigned long long interval_lines;
+    unsigned long long interval_bytes;
+
+    /* Last completed one-second rates */
+    double last_second_lines;
+    double last_second_bytes;
+
+    /* Timing */
     struct timespec start;
+    struct timespec interval_start;
 
     int enabled;
 };
@@ -52,66 +63,61 @@ static double elapsed_seconds(const struct timespec *start,
 
 
 /*
- * Format a byte rate into a human-readable form.
+ * Format a byte value into a human-readable form.
  *
- * Examples:
+ * Uses decimal units:
  *
- *     123        -> 123 B/s
- *     12345      -> 12.3 KB/s
- *     1234567    -> 1.23 MB/s
- *     1234567890 -> 1.23 GB/s
+ *     B
+ *     KB
+ *     MB
+ *     GB
+ *     TB
+ *     PB
  */
-static void format_rate(double bytes_per_second,
-                        char *buffer,
-                        size_t buffer_size)
+static void format_bytes(double bytes,
+                         char *buffer,
+                         size_t buffer_size)
 {
     const char *units[] = {
-        "B/s",
-        "KB/s",
-        "MB/s",
-        "GB/s",
-        "TB/s",
-        "PB/s"
+        "B",
+        "KB",
+        "MB",
+        "GB",
+        "TB",
+        "PB"
     };
 
     int unit = 0;
 
-
-    while (bytes_per_second >= 1000.0 &&
-           unit < 5) {
-
-        bytes_per_second /= 1000.0;
+    while (bytes >= 1000.0 && unit < 5) {
+        bytes /= 1000.0;
         unit++;
     }
 
-
-    if (bytes_per_second >= 100.0) {
-
+    if (bytes >= 100.0) {
         snprintf(
             buffer,
             buffer_size,
             "%.0f %s",
-            bytes_per_second,
+            bytes,
             units[unit]
         );
-
-    } else if (bytes_per_second >= 10.0) {
-
+    }
+    else if (bytes >= 10.0) {
         snprintf(
             buffer,
             buffer_size,
             "%.1f %s",
-            bytes_per_second,
+            bytes,
             units[unit]
         );
-
-    } else {
-
+    }
+    else {
         snprintf(
             buffer,
             buffer_size,
             "%.2f %s",
-            bytes_per_second,
+            bytes,
             units[unit]
         );
     }
@@ -119,9 +125,31 @@ static void format_rate(double bytes_per_second,
 
 
 /*
+ * Format a byte rate.
+ */
+static void format_rate(double bytes_per_second,
+                        char *buffer,
+                        size_t buffer_size)
+{
+    char value[64];
+
+    format_bytes(
+        bytes_per_second,
+        value,
+        sizeof(value)
+    );
+
+    snprintf(
+        buffer,
+        buffer_size,
+        "%s/s",
+        value
+    );
+}
+
+
+/*
  * Initialise status tracking.
- *
- * Status is always enabled.
  */
 static void status_init(struct status *status)
 {
@@ -131,12 +159,18 @@ static void status_init(struct status *status)
         sizeof(*status)
     );
 
+    /*
+     * Status is always enabled.
+     */
     status->enabled = 1;
 
     clock_gettime(
         CLOCK_MONOTONIC,
         &status->start
     );
+
+    status->interval_start =
+        status->start;
 }
 
 
@@ -159,14 +193,64 @@ static void status_clear(struct status *status)
 
 
 /*
- * Print the current status.
+ * Update the one-second statistics.
  *
- * Called after every input line.
+ * This is called after every input line.
+ *
+ * Once one second has elapsed, the current interval
+ * becomes the "Last 1s" measurement.
+ */
+static void status_calculate_interval(struct status *status)
+{
+    struct timespec now;
+
+    clock_gettime(
+        CLOCK_MONOTONIC,
+        &now
+    );
+
+    double interval =
+        elapsed_seconds(
+            &status->interval_start,
+            &now
+        );
+
+    if (interval < 1.0)
+        return;
+
+    /*
+     * Calculate the rate for the completed interval.
+     */
+    status->last_second_lines =
+        (double)status->interval_lines /
+        interval;
+
+    status->last_second_bytes =
+        (double)status->interval_bytes /
+        interval;
+
+    /*
+     * Start a new interval.
+     */
+    status->interval_lines = 0;
+    status->interval_bytes = 0;
+
+    status->interval_start = now;
+}
+
+
+/*
+ * Print the current status.
  */
 static void status_update(struct status *status)
 {
     if (!status->enabled)
         return;
+
+    /*
+     * Update the completed one-second interval.
+     */
+    status_calculate_interval(status);
 
 
     struct timespec now;
@@ -188,25 +272,51 @@ static void status_update(struct status *status)
         elapsed = 0.000001;
 
 
-    double lines_per_second =
+    /*
+     * Calculate average rates.
+     */
+    double average_lines =
         (double)status->lines /
         elapsed;
 
 
-    double bytes_per_second =
+    double average_bytes =
         (double)status->bytes /
         elapsed;
 
 
-    char rate_buffer[64];
+    /*
+     * Format byte values.
+     */
+    char total_bytes[128];
+    char average_rate[128];
+    char last_second_rate[128];
 
-    format_rate(
-        bytes_per_second,
-        rate_buffer,
-        sizeof(rate_buffer)
+
+    format_bytes(
+        (double)status->bytes,
+        total_bytes,
+        sizeof(total_bytes)
     );
 
 
+    format_rate(
+        average_bytes,
+        average_rate,
+        sizeof(average_rate)
+    );
+
+
+    format_rate(
+        status->last_second_bytes,
+        last_second_rate,
+        sizeof(last_second_rate)
+    );
+
+
+    /*
+     * Display status.
+     */
     fprintf(
         stderr,
 
@@ -214,14 +324,18 @@ static void status_update(struct status *status)
         ANSI_CLEAR_LINE
 
         "Lines: %llu  "
-        "Bytes: %llu  "
-        "Rate: %.0f lines/s  "
-        "%s",
+        "Bytes: %s  "
+        "Avg: %.0f lines/s  %s  "
+        "Last 1s: %.0f lines/s  %s",
 
         status->lines,
-        status->bytes,
-        lines_per_second,
-        rate_buffer
+        total_bytes,
+
+        average_lines,
+        average_rate,
+
+        status->last_second_lines,
+        last_second_rate
     );
 
 
@@ -230,7 +344,7 @@ static void status_update(struct status *status)
 
 
 /*
- * Print the final status line.
+ * Print the final status.
  */
 static void status_finish(struct status *status)
 {
@@ -257,25 +371,76 @@ static void status_finish(struct status *status)
         elapsed = 0.000001;
 
 
-    double lines_per_second =
+    /*
+     * Include the final partial interval in the
+     * Last 1s measurement.
+     */
+    double interval =
+        elapsed_seconds(
+            &status->interval_start,
+            &now
+        );
+
+
+    if (interval > 0.0 &&
+        (status->interval_lines > 0 ||
+         status->interval_bytes > 0)) {
+
+        status->last_second_lines =
+            (double)status->interval_lines /
+            interval;
+
+        status->last_second_bytes =
+            (double)status->interval_bytes /
+            interval;
+    }
+
+
+    /*
+     * Average rates.
+     */
+    double average_lines =
         (double)status->lines /
         elapsed;
 
 
-    double bytes_per_second =
+    double average_bytes =
         (double)status->bytes /
         elapsed;
 
 
-    char rate_buffer[64];
+    /*
+     * Format values.
+     */
+    char total_bytes[128];
+    char average_rate[128];
+    char last_second_rate[128];
 
-    format_rate(
-        bytes_per_second,
-        rate_buffer,
-        sizeof(rate_buffer)
+
+    format_bytes(
+        (double)status->bytes,
+        total_bytes,
+        sizeof(total_bytes)
     );
 
 
+    format_rate(
+        average_bytes,
+        average_rate,
+        sizeof(average_rate)
+    );
+
+
+    format_rate(
+        status->last_second_bytes,
+        last_second_rate,
+        sizeof(last_second_rate)
+    );
+
+
+    /*
+     * Print final status.
+     */
     fprintf(
         stderr,
 
@@ -283,14 +448,18 @@ static void status_finish(struct status *status)
         ANSI_CLEAR_LINE
 
         "Lines: %llu  "
-        "Bytes: %llu  "
-        "Rate: %.0f lines/s  "
-        "%s\n",
+        "Bytes: %s  "
+        "Avg: %.0f lines/s  %s  "
+        "Last 1s: %.0f lines/s  %s\n",
 
         status->lines,
-        status->bytes,
-        lines_per_second,
-        rate_buffer
+        total_bytes,
+
+        average_lines,
+        average_rate,
+
+        status->last_second_lines,
+        last_second_rate
     );
 
 
@@ -369,7 +538,7 @@ static void print_version(void)
  * Print highlighted text.
  */
 static void print_highlighted(const char *start,
-                             size_t length)
+                              size_t length)
 {
     fputs(
         COLOR_START,
@@ -463,7 +632,7 @@ static void highlight_regex(const char *line,
 
 
         /*
-         * Print text before match.
+         * Print text before the match.
          */
         if (match.rm_so > 0) {
 
@@ -496,7 +665,7 @@ static void highlight_regex(const char *line,
 /*
  * Highlight a column using whitespace separators.
  *
- * Similar to awk:
+ * Similar to:
  *
  *     awk '{print $9}'
  */
@@ -512,7 +681,7 @@ static void highlight_column_whitespace(
     while (*p != '\0') {
 
         /*
-         * Output whitespace unchanged.
+         * Print whitespace unchanged.
          */
         while (*p != '\0' &&
                isspace((unsigned char)*p)) {
@@ -523,6 +692,9 @@ static void highlight_column_whitespace(
         }
 
 
+        /*
+         * End of line.
+         */
         if (*p == '\0')
             return;
 
@@ -547,7 +719,7 @@ static void highlight_column_whitespace(
 
 
         /*
-         * Highlight selected column.
+         * Highlight selected field.
          */
         if (current_column == column) {
 
@@ -669,7 +841,7 @@ static void highlight_column_separator(
 
 
         /*
-         * Output separator unchanged.
+         * Print separator unchanged.
          */
         fwrite(
             separator_position,
@@ -978,7 +1150,7 @@ int main(int argc, char *argv[])
 
 
     /*
-     * Process stdin.
+     * Process stdin line by line.
      */
     while (1) {
 
@@ -995,7 +1167,7 @@ int main(int argc, char *argv[])
 
 
         /*
-         * Update statistics.
+         * Update total counters.
          */
         status.lines++;
 
@@ -1004,7 +1176,17 @@ int main(int argc, char *argv[])
 
 
         /*
-         * Clear the previous status line.
+         * Update current one-second counters.
+         */
+        status.interval_lines++;
+
+        status.interval_bytes +=
+            (unsigned long long)line_length;
+
+
+        /*
+         * Remove the previous status line before
+         * printing the next input line.
          */
         status_clear(
             &status
@@ -1032,14 +1214,14 @@ int main(int argc, char *argv[])
 
 
         /*
-         * Ensure stdout is flushed before
-         * drawing the status line.
+         * Make sure the highlighted line is written
+         * before the status line is displayed.
          */
         fflush(stdout);
 
 
         /*
-         * Display updated statistics.
+         * Display updated status.
          */
         status_update(
             &status
@@ -1067,7 +1249,7 @@ int main(int argc, char *argv[])
 
 
     /*
-     * Final status.
+     * Print final statistics.
      */
     status_finish(
         &status
