@@ -10,18 +10,18 @@
 #include <errno.h>
 #include <ctype.h>
 
-#define VERSION "1.2.0"
+#define VERSION "1.3.0"
 
 #define COLOR_START "\033[1;31m"
 #define COLOR_END   "\033[0m"
 
-#define ANSI_CLEAR_LINE "\033[2K"
-#define ANSI_CURSOR_HOME "\r"
+#define ANSI_CLEAR_LINE   "\033[2K"
+#define ANSI_CURSOR_START "\r"
 
 
 struct status {
     unsigned long long lines;
-    unsigned long long chars;
+    unsigned long long bytes;
 
     struct timespec start;
 
@@ -40,7 +40,7 @@ struct options {
 
 
 /*
- * Return elapsed time in seconds.
+ * Calculate elapsed time in seconds.
  */
 static double elapsed_seconds(const struct timespec *start,
                               const struct timespec *end)
@@ -52,16 +52,84 @@ static double elapsed_seconds(const struct timespec *start,
 
 
 /*
+ * Format a byte rate into a human-readable form.
+ *
+ * Examples:
+ *
+ *     123        -> 123 B/s
+ *     12345      -> 12.3 KB/s
+ *     1234567    -> 1.23 MB/s
+ *     1234567890 -> 1.23 GB/s
+ */
+static void format_rate(double bytes_per_second,
+                        char *buffer,
+                        size_t buffer_size)
+{
+    const char *units[] = {
+        "B/s",
+        "KB/s",
+        "MB/s",
+        "GB/s",
+        "TB/s",
+        "PB/s"
+    };
+
+    int unit = 0;
+
+
+    while (bytes_per_second >= 1000.0 &&
+           unit < 5) {
+
+        bytes_per_second /= 1000.0;
+        unit++;
+    }
+
+
+    if (bytes_per_second >= 100.0) {
+
+        snprintf(
+            buffer,
+            buffer_size,
+            "%.0f %s",
+            bytes_per_second,
+            units[unit]
+        );
+
+    } else if (bytes_per_second >= 10.0) {
+
+        snprintf(
+            buffer,
+            buffer_size,
+            "%.1f %s",
+            bytes_per_second,
+            units[unit]
+        );
+
+    } else {
+
+        snprintf(
+            buffer,
+            buffer_size,
+            "%.2f %s",
+            bytes_per_second,
+            units[unit]
+        );
+    }
+}
+
+
+/*
  * Initialise status tracking.
  *
  * Status is always enabled.
- *
- * The status is printed to stderr.
- * Highlighted input is printed to stdout.
  */
 static void status_init(struct status *status)
 {
-    memset(status, 0, sizeof(*status));
+    memset(
+        status,
+        0,
+        sizeof(*status)
+    );
 
     status->enabled = 1;
 
@@ -74,9 +142,6 @@ static void status_init(struct status *status)
 
 /*
  * Clear the current status line.
- *
- * This moves the cursor to the beginning of the line
- * and clears the entire terminal line.
  */
 static void status_clear(struct status *status)
 {
@@ -85,7 +150,7 @@ static void status_clear(struct status *status)
 
     fprintf(
         stderr,
-        ANSI_CURSOR_HOME
+        ANSI_CURSOR_START
         ANSI_CLEAR_LINE
     );
 
@@ -96,13 +161,14 @@ static void status_clear(struct status *status)
 /*
  * Print the current status.
  *
- * This is called after every input line.
+ * Called after every input line.
  */
 static void status_update(struct status *status)
 {
     if (!status->enabled)
         return;
 
+
     struct timespec now;
 
     clock_gettime(
@@ -110,56 +176,67 @@ static void status_update(struct status *status)
         &now
     );
 
+
     double elapsed =
         elapsed_seconds(
             &status->start,
             &now
         );
 
+
     if (elapsed <= 0.0)
         elapsed = 0.000001;
 
 
     double lines_per_second =
-        (double)status->lines / elapsed;
+        (double)status->lines /
+        elapsed;
 
 
-    double chars_per_second =
-        (double)status->chars / elapsed;
+    double bytes_per_second =
+        (double)status->bytes /
+        elapsed;
+
+
+    char rate_buffer[64];
+
+    format_rate(
+        bytes_per_second,
+        rate_buffer,
+        sizeof(rate_buffer)
+    );
 
 
     fprintf(
         stderr,
 
-        ANSI_CURSOR_HOME
+        ANSI_CURSOR_START
         ANSI_CLEAR_LINE
 
         "Lines: %llu  "
-        "Chars: %llu  "
+        "Bytes: %llu  "
         "Rate: %.0f lines/s  "
-        "%.2f MB/s",
+        "%s",
 
         status->lines,
-        status->chars,
+        status->bytes,
         lines_per_second,
-        chars_per_second /
-            (1024.0 * 1024.0)
+        rate_buffer
     );
+
 
     fflush(stderr);
 }
 
 
 /*
- * Print final status.
- *
- * Clears the existing status and writes the final
- * statistics followed by a newline.
+ * Print the final status line.
  */
 static void status_finish(struct status *status)
 {
     if (!status->enabled)
         return;
+
 
     struct timespec now;
 
@@ -175,35 +252,47 @@ static void status_finish(struct status *status)
             &now
         );
 
+
     if (elapsed <= 0.0)
         elapsed = 0.000001;
 
 
     double lines_per_second =
-        (double)status->lines / elapsed;
+        (double)status->lines /
+        elapsed;
 
 
-    double chars_per_second =
-        (double)status->chars / elapsed;
+    double bytes_per_second =
+        (double)status->bytes /
+        elapsed;
+
+
+    char rate_buffer[64];
+
+    format_rate(
+        bytes_per_second,
+        rate_buffer,
+        sizeof(rate_buffer)
+    );
 
 
     fprintf(
         stderr,
 
-        ANSI_CURSOR_HOME
+        ANSI_CURSOR_START
         ANSI_CLEAR_LINE
 
         "Lines: %llu  "
-        "Chars: %llu  "
+        "Bytes: %llu  "
         "Rate: %.0f lines/s  "
-        "%.2f MB/s\n",
+        "%s\n",
 
         status->lines,
-        status->chars,
+        status->bytes,
         lines_per_second,
-        chars_per_second /
-            (1024.0 * 1024.0)
+        rate_buffer
     );
+
 
     fflush(stderr);
 }
@@ -309,9 +398,11 @@ static void highlight_regex(const char *line,
 {
     const char *cursor = line;
 
+
     while (*cursor != '\0') {
 
         regmatch_t match;
+
 
         int result =
             regexec(
@@ -342,10 +433,6 @@ static void highlight_regex(const char *line,
          */
         if (match.rm_so == match.rm_eo) {
 
-            /*
-             * Print everything before the zero-length
-             * match.
-             */
             if (match.rm_so > 0) {
 
                 fwrite(
@@ -357,10 +444,6 @@ static void highlight_regex(const char *line,
             }
 
 
-            /*
-             * Advance one character so a regex such as
-             * ^ or $ cannot cause an infinite loop.
-             */
             if (cursor[match.rm_so] != '\0') {
 
                 putchar(
@@ -380,7 +463,7 @@ static void highlight_regex(const char *line,
 
 
         /*
-         * Print text before the match.
+         * Print text before match.
          */
         if (match.rm_so > 0) {
 
@@ -413,12 +496,9 @@ static void highlight_regex(const char *line,
 /*
  * Highlight a column using whitespace separators.
  *
- * This behaves similarly to awk:
+ * Similar to awk:
  *
  *     awk '{print $9}'
- *
- * Multiple whitespace characters are considered
- * separators.
  */
 static void highlight_column_whitespace(
     const char *line,
@@ -432,7 +512,7 @@ static void highlight_column_whitespace(
     while (*p != '\0') {
 
         /*
-         * Print whitespace unchanged.
+         * Output whitespace unchanged.
          */
         while (*p != '\0' &&
                isspace((unsigned char)*p)) {
@@ -443,9 +523,6 @@ static void highlight_column_whitespace(
         }
 
 
-        /*
-         * End of line.
-         */
         if (*p == '\0')
             return;
 
@@ -456,7 +533,7 @@ static void highlight_column_whitespace(
 
 
         /*
-         * Find the end of this field.
+         * Find end of field.
          */
         while (*p != '\0' &&
                !isspace((unsigned char)*p)) {
@@ -470,7 +547,7 @@ static void highlight_column_whitespace(
 
 
         /*
-         * Highlight selected field.
+         * Highlight selected column.
          */
         if (current_column == column) {
 
@@ -502,10 +579,6 @@ static void highlight_column_whitespace(
  * Input:
  *
  *     one:two:three:four
- *
- * Output:
- *
- *     one:two:<highlight>three</highlight>:four
  */
 static void highlight_column_separator(
     const char *line,
@@ -568,7 +641,7 @@ static void highlight_column_separator(
 
 
         /*
-         * Highlight selected field.
+         * Highlight selected column.
          */
         if (current_column == column) {
 
@@ -589,14 +662,14 @@ static void highlight_column_separator(
 
 
         /*
-         * No more separators.
+         * Last field.
          */
         if (separator_position == NULL)
             break;
 
 
         /*
-         * Print separator unchanged.
+         * Output separator unchanged.
          */
         fwrite(
             separator_position,
@@ -647,13 +720,14 @@ static void highlight_column(
 
 
 /*
- * Parse column number.
+ * Parse a positive column number.
  */
 static int parse_column(const char *value)
 {
     char *end = NULL;
 
     errno = 0;
+
 
     long column =
         strtol(
@@ -701,6 +775,7 @@ int main(int argc, char *argv[])
 {
     struct options options;
 
+
     memset(
         &options,
         0,
@@ -712,6 +787,7 @@ int main(int argc, char *argv[])
      * Parse command-line options.
      */
     int opt;
+
 
     while ((opt = getopt(
                 argc,
@@ -727,8 +803,10 @@ int main(int argc, char *argv[])
                     optarg
                 );
 
+
             if (options.column < 0)
                 return EXIT_FAILURE;
+
 
             options.column_mode = 1;
 
@@ -737,14 +815,16 @@ int main(int argc, char *argv[])
 
         case 'F':
 
-            options.separator = optarg;
+            options.separator =
+                optarg;
 
             break;
 
 
         case 'i':
 
-            options.case_insensitive = 1;
+            options.case_insensitive =
+                1;
 
             break;
 
@@ -789,9 +869,11 @@ int main(int argc, char *argv[])
                 "with -c\n\n"
             );
 
+
             print_usage(
                 argv[0]
             );
+
 
             return EXIT_FAILURE;
         }
@@ -809,9 +891,11 @@ int main(int argc, char *argv[])
                 "Error: regex is required\n\n"
             );
 
+
             print_usage(
                 argv[0]
             );
+
 
             return EXIT_FAILURE;
         }
@@ -875,8 +959,7 @@ int main(int argc, char *argv[])
 
 
     /*
-     * getline() dynamically allocates and expands
-     * the input buffer.
+     * getline() dynamically grows this buffer.
      */
     char *line = NULL;
 
@@ -888,13 +971,14 @@ int main(int argc, char *argv[])
      */
     struct status status;
 
+
     status_init(
         &status
     );
 
 
     /*
-     * Read stdin one line at a time.
+     * Process stdin.
      */
     while (1) {
 
@@ -911,17 +995,16 @@ int main(int argc, char *argv[])
 
 
         /*
-         * Update counters.
+         * Update statistics.
          */
         status.lines++;
 
-        status.chars +=
+        status.bytes +=
             (unsigned long long)line_length;
 
 
         /*
-         * Remove the previous status line
-         * before printing the next input line.
+         * Clear the previous status line.
          */
         status_clear(
             &status
@@ -929,7 +1012,7 @@ int main(int argc, char *argv[])
 
 
         /*
-         * Process the input line.
+         * Highlight the line.
          */
         if (options.column_mode) {
 
@@ -949,14 +1032,14 @@ int main(int argc, char *argv[])
 
 
         /*
-         * Ensure the highlighted line has been
-         * written before the status is displayed.
+         * Ensure stdout is flushed before
+         * drawing the status line.
          */
         fflush(stdout);
 
 
         /*
-         * Print the new status line.
+         * Display updated statistics.
          */
         status_update(
             &status
@@ -965,11 +1048,12 @@ int main(int argc, char *argv[])
 
 
     /*
-     * Check for stdin errors.
+     * Check stdin for errors.
      */
     if (ferror(stdin)) {
 
         perror("stdin");
+
 
         free(line);
 
