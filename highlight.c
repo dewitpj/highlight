@@ -47,6 +47,24 @@ struct options {
 
     char *separator;
     char *regex_pattern;
+
+    struct highlight_rule *rules;
+    size_t rule_count;
+    size_t rule_capacity;
+};
+
+struct highlight_rule {
+    char *pattern;
+    char *color_name;
+    regex_t regex;
+    int regex_compiled;
+};
+
+struct highlight_match {
+    size_t start;
+    size_t end;
+    const char *color;
+    size_t order;
 };
 
 
@@ -477,6 +495,7 @@ static void print_usage(const char *program)
 
         "Usage:\n"
         "  %s [options] <regex>\n"
+        "  %s [options] --red <regex> [--blue <regex> ...]\n"
         "  %s [options] -c <column>\n"
         "\n"
 
@@ -484,11 +503,19 @@ static void print_usage(const char *program)
         "\n"
 
         "Options:\n"
-        "  -c N        Highlight column N (1-based)\n"
-        "  -F SEP      Field separator for column mode\n"
-        "  -i          Case-insensitive regex matching\n"
-        "  -h          Show this help\n"
-        "  -v          Show version\n"
+        "  -c N                Highlight column N (1-based)\n"
+        "  -F SEP              Field separator for column mode\n"
+        "  -i                  Case-insensitive regex matching\n"
+        "  -h                  Show this help\n"
+        "  -v                  Show version\n"
+        "  --red REGEX         Highlight matches in red\n"
+        "  --green REGEX       Highlight matches in green\n"
+        "  --blue REGEX        Highlight matches in blue\n"
+        "  --yellow REGEX      Highlight matches in yellow\n"
+        "  --cyan REGEX        Highlight matches in cyan\n"
+        "  --magenta REGEX     Highlight matches in magenta\n"
+        "  --white REGEX       Highlight matches in white\n"
+        "  --black REGEX       Highlight matches in black\n"
         "\n"
 
         "Column mode:\n"
@@ -499,6 +526,7 @@ static void print_usage(const char *program)
         "Regex mode:\n"
         "  cat logfile | %s 'error|warning'\n"
         "  cat logfile | %s -i error\n"
+        "  echo 'foo bar' | %s --red foo --blue bar\n"
         "\n"
 
         "Examples:\n"
@@ -508,13 +536,12 @@ static void print_usage(const char *program)
 
         program,
         program,
-
         program,
         program,
-
         program,
         program,
-
+        program,
+        program,
         program,
         program,
         program
@@ -534,14 +561,39 @@ static void print_version(void)
 }
 
 
-/*
- * Print highlighted text.
- */
+static const char *ansi_color_for_name(const char *name)
+{
+    static const struct {
+        const char *name;
+        const char *ansi_code;
+    } colors[] = {
+        { "black",   "\033[1;30m" },
+        { "red",     "\033[1;31m" },
+        { "green",   "\033[1;32m" },
+        { "yellow",  "\033[1;33m" },
+        { "blue",    "\033[1;34m" },
+        { "magenta", "\033[1;35m" },
+        { "cyan",    "\033[1;36m" },
+        { "white",   "\033[1;37m" }
+    };
+
+    size_t i;
+
+    for (i = 0; i < sizeof(colors) / sizeof(colors[0]); i++) {
+        if (strcmp(name, colors[i].name) == 0)
+            return colors[i].ansi_code;
+    }
+
+    return "\033[1;31m";
+}
+
+
 static void print_highlighted(const char *start,
-                              size_t length)
+                              size_t length,
+                              const char *color_code)
 {
     fputs(
-        COLOR_START,
+        color_code,
         stdout
     );
 
@@ -553,17 +605,281 @@ static void print_highlighted(const char *start,
     );
 
     fputs(
-        COLOR_END,
+        "\033[0m",
         stdout
     );
+}
+
+
+static int add_highlight_rule(struct options *options,
+                              const char *color_name,
+                              const char *pattern)
+{
+    struct highlight_rule *rule;
+    char *pattern_copy;
+    char *color_copy;
+    int regex_flags;
+    int result;
+
+    if (options->rule_count == options->rule_capacity) {
+        size_t new_capacity =
+            options->rule_capacity == 0 ? 4 : options->rule_capacity * 2;
+
+        struct highlight_rule *new_rules =
+            realloc(
+                options->rules,
+                new_capacity * sizeof(*new_rules)
+            );
+
+        if (new_rules == NULL) {
+            fprintf(
+                stderr,
+                "Out of memory while adding highlight rule\n"
+            );
+
+            return -1;
+        }
+
+        options->rules = new_rules;
+        options->rule_capacity = new_capacity;
+    }
+
+    rule = &options->rules[options->rule_count];
+    memset(rule, 0, sizeof(*rule));
+
+    pattern_copy = strdup(pattern);
+    if (pattern_copy == NULL) {
+        fprintf(
+            stderr,
+            "Out of memory while copying regex pattern\n"
+        );
+
+        return -1;
+    }
+
+    color_copy = strdup(color_name);
+    if (color_copy == NULL) {
+        free(pattern_copy);
+        fprintf(
+            stderr,
+            "Out of memory while copying color name\n"
+        );
+
+        return -1;
+    }
+
+    regex_flags = REG_EXTENDED;
+
+    if (options->case_insensitive)
+        regex_flags |= REG_ICASE;
+
+    result = regcomp(&rule->regex, pattern_copy, regex_flags);
+    if (result != 0) {
+        char error_message[256];
+
+        regerror(
+            result,
+            &rule->regex,
+            error_message,
+            sizeof(error_message)
+        );
+
+        fprintf(
+            stderr,
+            "Regex error for --%s: %s\n",
+            color_name,
+            error_message
+        );
+
+        free(pattern_copy);
+        free(color_copy);
+        return -1;
+    }
+
+    rule->pattern = pattern_copy;
+    rule->color_name = color_copy;
+    rule->regex_compiled = 1;
+    options->rule_count++;
+
+    return 0;
+}
+
+
+static void free_highlight_rules(struct options *options)
+{
+    size_t i;
+
+    for (i = 0; i < options->rule_count; i++) {
+        struct highlight_rule *rule = &options->rules[i];
+
+        if (rule->regex_compiled)
+            regfree(&rule->regex);
+
+        free(rule->pattern);
+        free(rule->color_name);
+    }
+
+    free(options->rules);
+    options->rules = NULL;
+    options->rule_count = 0;
+    options->rule_capacity = 0;
+}
+
+
+static int compare_matches(const void *lhs,
+                           const void *rhs)
+{
+    const struct highlight_match *left = lhs;
+    const struct highlight_match *right = rhs;
+
+    if (left->start != right->start) {
+        if (left->start < right->start)
+            return -1;
+
+        return 1;
+    }
+
+    if (left->end != right->end) {
+        if (left->end > right->end)
+            return -1;
+
+        return 1;
+    }
+
+    if (left->order < right->order)
+        return -1;
+
+    if (left->order > right->order)
+        return 1;
+
+    return 0;
+}
+
+
+static void highlight_line_with_rules(const char *line,
+                                      const struct options *options)
+{
+    struct highlight_match *matches = NULL;
+    size_t match_count = 0;
+    size_t match_capacity = 0;
+    size_t i;
+    size_t output_index = 0;
+
+    for (i = 0; i < options->rule_count; i++) {
+        const struct highlight_rule *rule = &options->rules[i];
+        const char *cursor = line;
+
+        while (*cursor != '\0') {
+            regmatch_t match;
+            size_t start;
+            size_t end;
+            struct highlight_match *new_matches;
+
+            int result =
+                regexec(
+                    &rule->regex,
+                    cursor,
+                    1,
+                    &match,
+                    0
+                );
+
+            if (result != 0)
+                break;
+
+            if (match.rm_so == match.rm_eo) {
+                if (cursor[match.rm_so] == '\0')
+                    break;
+
+                cursor += match.rm_so + 1;
+                continue;
+            }
+
+            start = (size_t)(cursor - line) + (size_t)match.rm_so;
+            end = (size_t)(cursor - line) + (size_t)match.rm_eo;
+
+            if (match_count == match_capacity) {
+                size_t new_capacity =
+                    match_capacity == 0 ? 8 : match_capacity * 2;
+
+                new_matches =
+                    realloc(
+                        matches,
+                        new_capacity * sizeof(*matches)
+                    );
+
+                if (new_matches == NULL) {
+                    free(matches);
+                    fprintf(
+                        stderr,
+                        "Out of memory while collecting matches\n"
+                    );
+
+                    exit(EXIT_FAILURE);
+                }
+
+                matches = new_matches;
+                match_capacity = new_capacity;
+            }
+
+            matches[match_count].start = start;
+            matches[match_count].end = end;
+            matches[match_count].color = ansi_color_for_name(rule->color_name);
+            matches[match_count].order = match_count;
+            match_count++;
+
+            cursor += match.rm_eo;
+        }
+    }
+
+    if (match_count > 0) {
+        qsort(matches, match_count, sizeof(*matches), compare_matches);
+
+        for (i = 0; i < match_count; i++) {
+            const struct highlight_match *match = &matches[i];
+
+            if (match->start < output_index)
+                continue;
+
+            if (match->start > output_index) {
+                fwrite(
+                    line + output_index,
+                    1,
+                    match->start - output_index,
+                    stdout
+                );
+            }
+
+            print_highlighted(
+                line + match->start,
+                match->end - match->start,
+                match->color
+            );
+
+            output_index = match->end;
+        }
+
+        if (output_index < strlen(line)) {
+            fwrite(
+                line + output_index,
+                1,
+                strlen(line) - output_index,
+                stdout
+            );
+        }
+    } else {
+        fputs(line, stdout);
+    }
+
+    free(matches);
 }
 
 
 /*
  * Highlight every regex match in a line.
  */
-static void highlight_regex(const char *line,
-                            regex_t *regex)
+static void __attribute__((unused)) highlight_regex(const char *line,
+                                                  regex_t *regex)
 {
     const char *cursor = line;
 
@@ -650,7 +966,8 @@ static void highlight_regex(const char *line,
          */
         print_highlighted(
             cursor + match.rm_so,
-            match.rm_eo - match.rm_so
+            match.rm_eo - match.rm_so,
+            COLOR_START
         );
 
 
@@ -725,7 +1042,8 @@ static void highlight_column_whitespace(
 
             print_highlighted(
                 field_start,
-                field_length
+                field_length,
+                COLOR_START
             );
 
         } else {
@@ -819,7 +1137,8 @@ static void highlight_column_separator(
 
             print_highlighted(
                 field_start,
-                field_length
+                field_length,
+                COLOR_START
             );
 
         } else {
@@ -961,10 +1280,37 @@ int main(int argc, char *argv[])
     int opt;
 
 
-    while ((opt = getopt(
+    enum {
+        OPT_RED = 1000,
+        OPT_GREEN,
+        OPT_BLUE,
+        OPT_YELLOW,
+        OPT_CYAN,
+        OPT_MAGENTA,
+        OPT_WHITE,
+        OPT_BLACK
+    };
+
+    static const struct option long_options[] = {
+        { "red",     required_argument, NULL, OPT_RED },
+        { "green",   required_argument, NULL, OPT_GREEN },
+        { "blue",    required_argument, NULL, OPT_BLUE },
+        { "yellow",  required_argument, NULL, OPT_YELLOW },
+        { "cyan",    required_argument, NULL, OPT_CYAN },
+        { "magenta", required_argument, NULL, OPT_MAGENTA },
+        { "white",   required_argument, NULL, OPT_WHITE },
+        { "black",   required_argument, NULL, OPT_BLACK },
+        { "help",    no_argument,       NULL, 'h' },
+        { "version", no_argument,       NULL, 'v' },
+        { NULL,       0,                 NULL, 0 }
+    };
+
+    while ((opt = getopt_long(
                 argc,
                 argv,
-                "c:F:ihv")) != -1) {
+                "c:F:ihv",
+                long_options,
+                NULL)) != -1) {
 
         switch (opt) {
 
@@ -1017,6 +1363,54 @@ int main(int argc, char *argv[])
             return EXIT_SUCCESS;
 
 
+        case OPT_RED:
+            if (add_highlight_rule(&options, "red", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_GREEN:
+            if (add_highlight_rule(&options, "green", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_BLUE:
+            if (add_highlight_rule(&options, "blue", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_YELLOW:
+            if (add_highlight_rule(&options, "yellow", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_CYAN:
+            if (add_highlight_rule(&options, "cyan", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_MAGENTA:
+            if (add_highlight_rule(&options, "magenta", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_WHITE:
+            if (add_highlight_rule(&options, "white", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
+        case OPT_BLACK:
+            if (add_highlight_rule(&options, "black", optarg) != 0)
+                return EXIT_FAILURE;
+            break;
+
+
         default:
 
             print_usage(
@@ -1033,7 +1427,7 @@ int main(int argc, char *argv[])
      */
     if (options.column_mode) {
 
-        if (optind < argc) {
+        if (optind < argc || options.rule_count > 0) {
 
             fprintf(
                 stderr,
@@ -1056,75 +1450,37 @@ int main(int argc, char *argv[])
      */
     } else {
 
-        if (optind >= argc) {
+        if (options.rule_count == 0) {
+            if (optind >= argc) {
 
-            fprintf(
-                stderr,
-                "Error: regex is required\n\n"
-            );
-
-
-            print_usage(
-                argv[0]
-            );
+                fprintf(
+                    stderr,
+                    "Error: regex is required\n\n"
+                );
 
 
-            return EXIT_FAILURE;
+                print_usage(
+                    argv[0]
+                );
+
+
+                return EXIT_FAILURE;
+            }
+
+            if (add_highlight_rule(&options, "red", argv[optind]) != 0)
+                return EXIT_FAILURE;
+
+            optind++;
         }
 
-
-        options.regex_pattern =
-            argv[optind];
-    }
-
-
-    /*
-     * Compile regex.
-     */
-    regex_t regex;
-
-
-    if (!options.column_mode) {
-
-        int regex_flags =
-            REG_EXTENDED;
-
-
-        if (options.case_insensitive) {
-
-            regex_flags |=
-                REG_ICASE;
-        }
-
-
-        int result =
-            regcomp(
-                &regex,
-                options.regex_pattern,
-                regex_flags
-            );
-
-
-        if (result != 0) {
-
-            char error_message[256];
-
-
-            regerror(
-                result,
-                &regex,
-                error_message,
-                sizeof(error_message)
-            );
-
-
+        if (optind < argc) {
             fprintf(
                 stderr,
-                "Regex error: %s\n",
-                error_message
+                "Error: unexpected argument: %s\n\n",
+                argv[optind]
             );
 
-
+            print_usage(argv[0]);
             return EXIT_FAILURE;
         }
     }
@@ -1206,9 +1562,9 @@ int main(int argc, char *argv[])
 
         } else {
 
-            highlight_regex(
+            highlight_line_with_rules(
                 line,
-                &regex
+                &options
             );
         }
 
@@ -1239,10 +1595,8 @@ int main(int argc, char *argv[])
 
         free(line);
 
-
         if (!options.column_mode)
-            regfree(&regex);
-
+            free_highlight_rules(&options);
 
         return EXIT_FAILURE;
     }
@@ -1261,10 +1615,8 @@ int main(int argc, char *argv[])
      */
     free(line);
 
-
     if (!options.column_mode)
-        regfree(&regex);
-
+        free_highlight_rules(&options);
 
     return EXIT_SUCCESS;
 }

@@ -44,6 +44,12 @@ This creates the executable:
 highlight
 ```
 
+The default build enables fortified libc checks, stack protection, format-string
+warnings, and position-independent executables. On Linux it also enables
+stack-clash and x86 control-flow protection, plus full RELRO and a non-executable
+stack. Set `HARDENING_CFLAGS` or `HARDENING_LDFLAGS` on the `make` command line
+to customize or disable these options for a specific toolchain.
+
 ---
 
 ## Installation
